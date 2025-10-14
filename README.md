@@ -17,6 +17,7 @@ Flux-Dev Demo: https://huggingface.co/spaces/ChenDY/NAG_FLUX.1-dev
 ![comfyui-nag](workflow.png?cache=20250628)
 
 ## News
+2025-14-10: updated for use in newer comfyui versions
 
 2025-07-06: Add three new nodes:
 - `KSamplerWithNAG (Advanced)` as a drop-in replacement for `KSampler (Advanced)`.

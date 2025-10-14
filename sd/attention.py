@@ -17,13 +17,15 @@ class NAGCrossAttention(CrossAttention):
         self.nag_tau = nag_tau
         self.nag_alpha = nag_alpha
     
-    def forward(
-            self,
-            x,
-            context=None,
-            value=None,
-            mask=None,
-    ):
+def forward(
+        self,
+        x,
+        context=None,
+        value=None,
+        mask=None,
+        transformer_options=None,
+        **kwargs,
+):
         origin_bsz = len(context) - len(x)
         assert origin_bsz != 0
 
