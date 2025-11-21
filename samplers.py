@@ -199,6 +199,7 @@ class NAGCFGGuider(CFGGuider):
                 callback,
                 disable_pbar,
                 seed,
+                latent_shapes=latent_shapes,
             )
         finally:
             cast_to_load_options(self.model_options, device=self.model_patcher.offload_device)
