@@ -38,7 +38,10 @@ class NAGChroma(Chroma):
         mod_index_length = 344
         distill_timestep = timestep_embedding(timesteps.detach().clone(), 16).to(img.device, img.dtype)
         # guidance = guidance *
-        distil_guidance = timestep_embedding(guidance.detach().clone(), 16).to(img.device, img.dtype)
+        if guidance is not None:
+            distil_guidance = timestep_embedding(guidance.detach().clone(), 16).to(img.device, img.dtype)
+        else:
+            distil_guidance = torch.zeros_like(distill_timestep)
 
         # get all modulation index
         modulation_index = timestep_embedding(torch.arange(mod_index_length, device=img.device), 32).to(img.device, img.dtype)
