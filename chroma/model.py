@@ -6,11 +6,7 @@ from torch import Tensor
 from einops import rearrange, repeat
 import comfy.ldm.common_dit
 
-from comfy.ldm.flux.layers import timestep_embedding
-from comfy.ldm.chroma.layers import (
-    DoubleStreamBlock,
-    SingleStreamBlock,
-)
+from comfy.ldm.flux.layers import timestep_embedding, DoubleStreamBlock, SingleStreamBlock
 from comfy.ldm.chroma.model import Chroma
 
 from .layers import NAGDoubleStreamBlock, NAGSingleStreamBlock
@@ -42,7 +38,10 @@ class NAGChroma(Chroma):
         mod_index_length = 344
         distill_timestep = timestep_embedding(timesteps.detach().clone(), 16).to(img.device, img.dtype)
         # guidance = guidance *
-        distil_guidance = timestep_embedding(guidance.detach().clone(), 16).to(img.device, img.dtype)
+        if guidance is not None:
+            distil_guidance = timestep_embedding(guidance.detach().clone(), 16).to(img.device, img.dtype)
+        else:
+            distil_guidance = torch.zeros_like(distill_timestep)
 
         # get all modulation index
         modulation_index = timestep_embedding(torch.arange(mod_index_length, device=img.device), 32).to(img.device, img.dtype)
@@ -60,10 +59,19 @@ class NAGChroma(Chroma):
 
         txt = self.txt_in(txt)
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)
-        ids_negative = torch.cat((txt_ids_negative, img_ids[-origin_bsz:]), dim=1)
-        pe = self.pe_embedder(ids)
-        pe_negative = self.pe_embedder(ids_negative)
+        if img_ids is not None and img_ids.ndim >= 2:
+            ids = torch.cat((txt_ids, img_ids), dim=1)
+            if origin_bsz > 0:
+                ids_negative = torch.cat((txt_ids_negative, img_ids[-origin_bsz:]), dim=1)
+            else:
+                # When origin_bsz <= 0, just use img_ids without slicing
+                ids_negative = torch.cat((txt_ids_negative, img_ids), dim=1)
+            pe = self.pe_embedder(ids)
+            pe_negative = self.pe_embedder(ids_negative)
+        else:
+            # Fallback when img_ids is None or has wrong dimensions
+            pe = None
+            pe_negative = None
 
         blocks_replace = patches_replace.get("dit", {})
         for i, block in enumerate(self.double_blocks):
@@ -188,47 +196,52 @@ class NAGChroma(Chroma):
             double_blocks_forward = list()
             single_blocks_forward = list()
 
-            self.forward_orig = MethodType(NAGChroma.forward_orig, self)
-            for block in self.double_blocks:
-                double_blocks_forward.append(block.forward)
-                block.forward = MethodType(
-                    partial(
-                        NAGDoubleStreamBlock.forward,
-                        context_pad_len=context_pad_len,
-                        nag_pad_len=nag_pad_len,
-                    ),
-                    block,
-                )
-            for block in self.single_blocks:
-                single_blocks_forward.append(block.forward)
-                block.forward = MethodType(
-                    partial(
-                        NAGSingleStreamBlock.forward,
-                        txt_length=context.shape[1],
-                        origin_bsz=nag_bsz,
-                        context_pad_len=context_pad_len,
-                        nag_pad_len=nag_pad_len,
-                    ),
-                    block,
-                )
+            try:
+                self.forward_orig = MethodType(NAGChroma.forward_orig, self)
+                for block in self.double_blocks:
+                    double_blocks_forward.append(block.forward)
+                    block.forward = MethodType(
+                        partial(
+                            NAGDoubleStreamBlock.forward,
+                            context_pad_len=context_pad_len,
+                            nag_pad_len=nag_pad_len,
+                        ),
+                        block,
+                    )
+                for block in self.single_blocks:
+                    single_blocks_forward.append(block.forward)
+                    block.forward = MethodType(
+                        partial(
+                            NAGSingleStreamBlock.forward,
+                            txt_length=context.shape[1],
+                            origin_bsz=nag_bsz,
+                            context_pad_len=context_pad_len,
+                            nag_pad_len=nag_pad_len,
+                        ),
+                        block,
+                    )
 
-            txt_ids = torch.zeros((bs, origin_context_len, 3), device=x.device, dtype=x.dtype)
-            txt_ids_negative = torch.zeros((nag_bsz, nag_negative_context_len, 3), device=x.device, dtype=x.dtype)
-            out = self.forward_orig(
-                img, img_ids, context, txt_ids, txt_ids_negative, timestep, guidance, control, transformer_options,
-                attn_mask=kwargs.get("attention_mask", None),
-            )
-
-            self.forward_orig = forward_orig_
-            for block in self.double_blocks:
-                block.forward = double_blocks_forward.pop(0)
-            for block in self.single_blocks:
-                block.forward = single_blocks_forward.pop(0)
+                txt_ids = torch.zeros((bs, origin_context_len, 3), device=x.device, dtype=x.dtype)
+                txt_ids_negative = torch.zeros((nag_bsz, nag_negative_context_len, 3), device=x.device, dtype=x.dtype)
+                out = self.forward_orig(
+                    img, img_ids, context, txt_ids, txt_ids_negative, timestep, guidance, control, transformer_options,
+                    attn_mask=kwargs.get("attention_mask", None),
+                )
+            finally:
+                # Always restore, even on interruption
+                self.forward_orig = forward_orig_
+                for block in self.double_blocks:
+                    if double_blocks_forward:
+                        block.forward = double_blocks_forward.pop(0)
+                for block in self.single_blocks:
+                    if single_blocks_forward:
+                        block.forward = single_blocks_forward.pop(0)
 
         else:
             txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
-            out = self.forward_orig(
-                img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options,
+            # Call base Chroma.forward_orig directly to avoid issues if self.forward_orig was left in NAG state
+            out = Chroma.forward_orig(
+                self, img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options,
                 attn_mask=kwargs.get("attention_mask", None),
             )
 

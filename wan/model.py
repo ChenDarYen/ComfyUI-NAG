@@ -373,55 +373,85 @@ class NAGWanModel(WanModel):
             forward_orig_ = self.forward_orig
             cross_attns_forward = list()
 
-            if transformer_options.get("enable_teacache", False):
-                self.forward_orig = MethodType(NAGWanModel.forward_orig_with_teacache, self)
-            else:
-                self.forward_orig = MethodType(NAGWanModel.forward_orig, self)
+            try:
+                if transformer_options.get("enable_teacache", False):
+                    self.forward_orig = MethodType(NAGWanModel.forward_orig_with_teacache, self)
+                else:
+                    self.forward_orig = MethodType(NAGWanModel.forward_orig, self)
 
-            cross_attn_cls = NAGWanT2VCrossAttention if self.model_type == "t2v" else NAGWanI2VCrossAttention
-            for name, module in self.named_modules():
-                if "cross_attn" in name and isinstance(module, WanSelfAttention):
-                    cross_attns_forward.append((module, module.forward))
-                    module.forward = MethodType(
-                        partial(
-                            cross_attn_cls.forward,
-                            context_pad_len=context_pad_len,
-                            nag_pad_len=nag_pad_len,
-                        ),
-                        module,
-                    )
+                cross_attn_cls = NAGWanT2VCrossAttention if self.model_type == "t2v" else NAGWanI2VCrossAttention
+                for name, module in self.named_modules():
+                    if "cross_attn" in name and isinstance(module, WanSelfAttention):
+                        cross_attns_forward.append((module, module.forward))
+                        module.forward = MethodType(
+                            partial(
+                                cross_attn_cls.forward,
+                                context_pad_len=context_pad_len,
+                                nag_pad_len=nag_pad_len,
+                            ),
+                            module,
+                        )
 
-        bs, c, t, h, w = x.shape
-        x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
+                bs, c, t, h, w = x.shape
+                x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
 
-        patch_size = self.patch_size
-        t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
-        h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
-        w_len = ((w + (patch_size[2] // 2)) // patch_size[2])
+                patch_size = self.patch_size
+                t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
+                h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
+                w_len = ((w + (patch_size[2] // 2)) // patch_size[2])
 
-        if time_dim_concat is not None:
-            time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
-            x = torch.cat([x, time_dim_concat], dim=2)
-            t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
+                if time_dim_concat is not None:
+                    time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
+                    x = torch.cat([x, time_dim_concat], dim=2)
+                    t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
 
-        img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
-        img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device,
-                                                                   dtype=x.dtype).reshape(-1, 1, 1)
-        img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device,
-                                                                   dtype=x.dtype).reshape(1, -1, 1)
-        img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device,
-                                                                   dtype=x.dtype).reshape(1, 1, -1)
-        img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=bs)
+                img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
+                img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device,
+                                                                           dtype=x.dtype).reshape(-1, 1, 1)
+                img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device,
+                                                                           dtype=x.dtype).reshape(1, -1, 1)
+                img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device,
+                                                                           dtype=x.dtype).reshape(1, 1, -1)
+                img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=bs)
 
-        freqs = self.rope_embedder(img_ids).movedim(1, 2)
-        output = self.forward_orig(
-            x, timestep, context, clip_fea=clip_fea, freqs=freqs,
-            transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
+                freqs = self.rope_embedder(img_ids).movedim(1, 2)
+                output = self.forward_orig(
+                    x, timestep, context, clip_fea=clip_fea, freqs=freqs,
+                    transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
+            finally:
+                # Always restore, even on interruption
+                self.forward_orig = forward_orig_
+                for mod, forward_fn in cross_attns_forward:
+                    mod.forward = forward_fn
 
-        if apply_nag:
-            self.forward_orig = forward_orig_
-            for mod, forward_fn in cross_attns_forward:
-                mod.forward = forward_fn
+        else:
+            bs, c, t, h, w = x.shape
+            x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
+
+            patch_size = self.patch_size
+            t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
+            h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
+            w_len = ((w + (patch_size[2] // 2)) // patch_size[2])
+
+            if time_dim_concat is not None:
+                time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
+                x = torch.cat([x, time_dim_concat], dim=2)
+                t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
+
+            img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
+            img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device,
+                                                                       dtype=x.dtype).reshape(-1, 1, 1)
+            img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device,
+                                                                       dtype=x.dtype).reshape(1, -1, 1)
+            img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device,
+                                                                       dtype=x.dtype).reshape(1, 1, -1)
+            img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=bs)
+
+            freqs = self.rope_embedder(img_ids).movedim(1, 2)
+            # Call base WanModel.forward_orig directly to avoid issues if self.forward_orig was left in NAG state
+            output = WanModel.forward_orig(
+                self, x, timestep, context, clip_fea=clip_fea, freqs=freqs,
+                transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
 
         return output
 
@@ -652,52 +682,82 @@ class NAGVaceWanModel(VaceWanModel):
             forward_orig_ = self.forward_orig
             cross_attns_forward = list()
 
-            if transformer_options.get("enable_teacache", False):
-                self.forward_orig = MethodType(NAGVaceWanModel.forward_orig_with_teacache, self)
-            else:
-                self.forward_orig = MethodType(NAGVaceWanModel.forward_orig, self)
-            for name, module in self.named_modules():
-                if "cross_attn" in name and isinstance(module, WanSelfAttention):
-                    cross_attns_forward.append((module, module.forward))
-                    module.forward = MethodType(
-                        partial(
-                            NAGWanT2VCrossAttention.forward,
-                            context_pad_len=context_pad_len,
-                            nag_pad_len=nag_pad_len,
-                        ),
-                        module,
-                    )
+            try:
+                if transformer_options.get("enable_teacache", False):
+                    self.forward_orig = MethodType(NAGVaceWanModel.forward_orig_with_teacache, self)
+                else:
+                    self.forward_orig = MethodType(NAGVaceWanModel.forward_orig, self)
+                for name, module in self.named_modules():
+                    if "cross_attn" in name and isinstance(module, WanSelfAttention):
+                        cross_attns_forward.append((module, module.forward))
+                        module.forward = MethodType(
+                            partial(
+                                NAGWanT2VCrossAttention.forward,
+                                context_pad_len=context_pad_len,
+                                nag_pad_len=nag_pad_len,
+                            ),
+                            module,
+                        )
 
-        bs, c, t, h, w = x.shape
-        x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
+                bs, c, t, h, w = x.shape
+                x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
 
-        patch_size = self.patch_size
-        t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
-        h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
-        w_len = ((w + (patch_size[2] // 2)) // patch_size[2])
+                patch_size = self.patch_size
+                t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
+                h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
+                w_len = ((w + (patch_size[2] // 2)) // patch_size[2])
 
-        if time_dim_concat is not None:
-            time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
-            x = torch.cat([x, time_dim_concat], dim=2)
-            t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
+                if time_dim_concat is not None:
+                    time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
+                    x = torch.cat([x, time_dim_concat], dim=2)
+                    t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
 
-        img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
-        img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device,
-                                                                   dtype=x.dtype).reshape(-1, 1, 1)
-        img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device,
-                                                                   dtype=x.dtype).reshape(1, -1, 1)
-        img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device,
-                                                                   dtype=x.dtype).reshape(1, 1, -1)
-        img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=bs)
+                img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
+                img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device,
+                                                                           dtype=x.dtype).reshape(-1, 1, 1)
+                img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device,
+                                                                           dtype=x.dtype).reshape(1, -1, 1)
+                img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device,
+                                                                           dtype=x.dtype).reshape(1, 1, -1)
+                img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=bs)
 
-        freqs = self.rope_embedder(img_ids).movedim(1, 2)
-        output = self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs,
-                                 transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
+                freqs = self.rope_embedder(img_ids).movedim(1, 2)
+                output = self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs,
+                                         transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
+            finally:
+                # Always restore, even on interruption
+                self.forward_orig = forward_orig_
+                for mod, forward_fn in cross_attns_forward:
+                    mod.forward = forward_fn
 
-        if apply_nag:
-            self.forward_orig = forward_orig_
-            for mod, forward_fn in cross_attns_forward:
-                mod.forward = forward_fn
+        else:
+            bs, c, t, h, w = x.shape
+            x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
+
+            patch_size = self.patch_size
+            t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
+            h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
+            w_len = ((w + (patch_size[2] // 2)) // patch_size[2])
+
+            if time_dim_concat is not None:
+                time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
+                x = torch.cat([x, time_dim_concat], dim=2)
+                t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
+
+            img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
+            img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device,
+                                                                       dtype=x.dtype).reshape(-1, 1, 1)
+            img_ids[:, :, :, 1] = img_ids[:, :, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device,
+                                                                       dtype=x.dtype).reshape(1, -1, 1)
+            img_ids[:, :, :, 2] = img_ids[:, :, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device,
+                                                                       dtype=x.dtype).reshape(1, 1, -1)
+            img_ids = repeat(img_ids, "t h w c -> b (t h w) c", b=bs)
+
+            freqs = self.rope_embedder(img_ids).movedim(1, 2)
+            # Call base VaceWanModel.forward_orig directly to avoid issues if self.forward_orig was left in NAG state
+            output = VaceWanModel.forward_orig(
+                self, x, timestep, context, clip_fea=clip_fea, freqs=freqs,
+                transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
 
         return output
 
