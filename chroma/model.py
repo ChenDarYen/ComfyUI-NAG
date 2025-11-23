@@ -59,10 +59,19 @@ class NAGChroma(Chroma):
 
         txt = self.txt_in(txt)
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)
-        ids_negative = torch.cat((txt_ids_negative, img_ids[-origin_bsz:]), dim=1)
-        pe = self.pe_embedder(ids)
-        pe_negative = self.pe_embedder(ids_negative)
+        if img_ids is not None and img_ids.ndim >= 2:
+            ids = torch.cat((txt_ids, img_ids), dim=1)
+            if origin_bsz > 0:
+                ids_negative = torch.cat((txt_ids_negative, img_ids[-origin_bsz:]), dim=1)
+            else:
+                # When origin_bsz <= 0, just use img_ids without slicing
+                ids_negative = torch.cat((txt_ids_negative, img_ids), dim=1)
+            pe = self.pe_embedder(ids)
+            pe_negative = self.pe_embedder(ids_negative)
+        else:
+            # Fallback when img_ids is None or has wrong dimensions
+            pe = None
+            pe_negative = None
 
         blocks_replace = patches_replace.get("dit", {})
         for i, block in enumerate(self.double_blocks):
