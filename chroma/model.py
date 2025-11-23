@@ -196,47 +196,52 @@ class NAGChroma(Chroma):
             double_blocks_forward = list()
             single_blocks_forward = list()
 
-            self.forward_orig = MethodType(NAGChroma.forward_orig, self)
-            for block in self.double_blocks:
-                double_blocks_forward.append(block.forward)
-                block.forward = MethodType(
-                    partial(
-                        NAGDoubleStreamBlock.forward,
-                        context_pad_len=context_pad_len,
-                        nag_pad_len=nag_pad_len,
-                    ),
-                    block,
-                )
-            for block in self.single_blocks:
-                single_blocks_forward.append(block.forward)
-                block.forward = MethodType(
-                    partial(
-                        NAGSingleStreamBlock.forward,
-                        txt_length=context.shape[1],
-                        origin_bsz=nag_bsz,
-                        context_pad_len=context_pad_len,
-                        nag_pad_len=nag_pad_len,
-                    ),
-                    block,
-                )
+            try:
+                self.forward_orig = MethodType(NAGChroma.forward_orig, self)
+                for block in self.double_blocks:
+                    double_blocks_forward.append(block.forward)
+                    block.forward = MethodType(
+                        partial(
+                            NAGDoubleStreamBlock.forward,
+                            context_pad_len=context_pad_len,
+                            nag_pad_len=nag_pad_len,
+                        ),
+                        block,
+                    )
+                for block in self.single_blocks:
+                    single_blocks_forward.append(block.forward)
+                    block.forward = MethodType(
+                        partial(
+                            NAGSingleStreamBlock.forward,
+                            txt_length=context.shape[1],
+                            origin_bsz=nag_bsz,
+                            context_pad_len=context_pad_len,
+                            nag_pad_len=nag_pad_len,
+                        ),
+                        block,
+                    )
 
-            txt_ids = torch.zeros((bs, origin_context_len, 3), device=x.device, dtype=x.dtype)
-            txt_ids_negative = torch.zeros((nag_bsz, nag_negative_context_len, 3), device=x.device, dtype=x.dtype)
-            out = self.forward_orig(
-                img, img_ids, context, txt_ids, txt_ids_negative, timestep, guidance, control, transformer_options,
-                attn_mask=kwargs.get("attention_mask", None),
-            )
-
-            self.forward_orig = forward_orig_
-            for block in self.double_blocks:
-                block.forward = double_blocks_forward.pop(0)
-            for block in self.single_blocks:
-                block.forward = single_blocks_forward.pop(0)
+                txt_ids = torch.zeros((bs, origin_context_len, 3), device=x.device, dtype=x.dtype)
+                txt_ids_negative = torch.zeros((nag_bsz, nag_negative_context_len, 3), device=x.device, dtype=x.dtype)
+                out = self.forward_orig(
+                    img, img_ids, context, txt_ids, txt_ids_negative, timestep, guidance, control, transformer_options,
+                    attn_mask=kwargs.get("attention_mask", None),
+                )
+            finally:
+                # Always restore, even on interruption
+                self.forward_orig = forward_orig_
+                for block in self.double_blocks:
+                    if double_blocks_forward:
+                        block.forward = double_blocks_forward.pop(0)
+                for block in self.single_blocks:
+                    if single_blocks_forward:
+                        block.forward = single_blocks_forward.pop(0)
 
         else:
             txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
-            out = self.forward_orig(
-                img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options,
+            # Call base Chroma.forward_orig directly to avoid issues if self.forward_orig was left in NAG state
+            out = Chroma.forward_orig(
+                self, img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options,
                 attn_mask=kwargs.get("attention_mask", None),
             )
 

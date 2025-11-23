@@ -662,75 +662,80 @@ class NAGHunyuanVideo(HunyuanVideo):
                 double_blocks = cached_blocks.transformer_blocks
                 single_blocks = cached_blocks.single_transformer_blocks
 
-            if transformer_options.get("enable_teacache", False):
-                self.forward_orig = MethodType(NAGHunyuanVideo.forward_orig_with_teacache, self)
+            try:
+                if transformer_options.get("enable_teacache", False):
+                    self.forward_orig = MethodType(NAGHunyuanVideo.forward_orig_with_teacache, self)
 
-            elif is_wavespeed:
-                get_can_use_cache = cached_blocks.forward.__globals__["get_can_use_cache"]
-                set_buffer = cached_blocks.forward.__globals__["set_buffer"]
-                apply_prev_hidden_states_residual = cached_blocks.forward.__globals__["apply_prev_hidden_states_residual"]
+                elif is_wavespeed:
+                    get_can_use_cache = cached_blocks.forward.__globals__["get_can_use_cache"]
+                    set_buffer = cached_blocks.forward.__globals__["set_buffer"]
+                    apply_prev_hidden_states_residual = cached_blocks.forward.__globals__["apply_prev_hidden_states_residual"]
 
-                def use_cache(first_hidden_states_residual):
-                    return get_can_use_cache(
-                        first_hidden_states_residual,
-                        threshold=cached_blocks.residual_diff_threshold,
-                        validation_function=cached_blocks.validate_can_use_cache_function,
+                    def use_cache(first_hidden_states_residual):
+                        return get_can_use_cache(
+                            first_hidden_states_residual,
+                            threshold=cached_blocks.residual_diff_threshold,
+                            validation_function=cached_blocks.validate_can_use_cache_function,
+                        )
+
+                    self.forward_orig = MethodType(
+                        partial(
+                            NAGHunyuanVideo.forward_orig_with_wavespeed,
+                            use_cache=use_cache,
+                            apply_prev_hidden_states_residual=apply_prev_hidden_states_residual,
+                            set_buffer=set_buffer,
+                        ),
+                        self,
                     )
 
-                self.forward_orig = MethodType(
-                    partial(
-                        NAGHunyuanVideo.forward_orig_with_wavespeed,
-                        use_cache=use_cache,
-                        apply_prev_hidden_states_residual=apply_prev_hidden_states_residual,
-                        set_buffer=set_buffer,
-                    ),
-                    self,
+                else:
+                    self.forward_orig = MethodType(NAGHunyuanVideo.forward_orig, self)
+
+                for block in double_blocks:
+                    double_blocks_forward.append(block.forward)
+                    block.forward = MethodType(
+                        partial(
+                            NAGDoubleStreamBlock.forward,
+                            context_pad_len=context_pad_len,
+                            nag_pad_len=nag_pad_len,
+                        ),
+                        block,
+                    )
+
+                for block in single_blocks:
+                    single_blocks_forward.append(block.forward)
+                    block.forward = MethodType(
+                        partial(
+                            NAGSingleStreamBlock.forward,
+                            img_length=img_ids.shape[1],
+                            origin_bsz=nag_bsz,
+                            context_pad_len=context_pad_len,
+                            nag_pad_len=nag_pad_len,
+                        ),
+                        block,
+                    )
+
+                txt_ids = torch.zeros((bs, origin_context_len, 3), device=x.device, dtype=x.dtype)
+                txt_ids_negative = torch.zeros((nag_bsz, nag_negative_context_len, 3), device=x.device, dtype=x.dtype)
+                out = self.forward_orig(
+                    x, img_ids, context, txt_ids, txt_ids_negative, attention_mask, timestep, y, guidance, guiding_frame_index, ref_latent,
+                    control=control, transformer_options=transformer_options,
                 )
-
-            else:
-                self.forward_orig = MethodType(NAGHunyuanVideo.forward_orig, self)
-
-            for block in double_blocks:
-                double_blocks_forward.append(block.forward)
-                block.forward = MethodType(
-                    partial(
-                        NAGDoubleStreamBlock.forward,
-                        context_pad_len=context_pad_len,
-                        nag_pad_len=nag_pad_len,
-                    ),
-                    block,
-                )
-
-            for block in single_blocks:
-                single_blocks_forward.append(block.forward)
-                block.forward = MethodType(
-                    partial(
-                        NAGSingleStreamBlock.forward,
-                        img_length=img_ids.shape[1],
-                        origin_bsz=nag_bsz,
-                        context_pad_len=context_pad_len,
-                        nag_pad_len=nag_pad_len,
-                    ),
-                    block,
-                )
-
-            txt_ids = torch.zeros((bs, origin_context_len, 3), device=x.device, dtype=x.dtype)
-            txt_ids_negative = torch.zeros((nag_bsz, nag_negative_context_len, 3), device=x.device, dtype=x.dtype)
-            out = self.forward_orig(
-                x, img_ids, context, txt_ids, txt_ids_negative, attention_mask, timestep, y, guidance, guiding_frame_index, ref_latent,
-                control=control, transformer_options=transformer_options,
-            )
-
-            self.forward_orig = forward_orig_
-            for block in double_blocks:
-                block.forward = double_blocks_forward.pop(0)
-            for block in single_blocks:
-                block.forward = single_blocks_forward.pop(0)
+            finally:
+                # Always restore, even on interruption
+                self.forward_orig = forward_orig_
+                for block in double_blocks:
+                    if double_blocks_forward:
+                        block.forward = double_blocks_forward.pop(0)
+                for block in single_blocks:
+                    if single_blocks_forward:
+                        block.forward = single_blocks_forward.pop(0)
 
         else:
             txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
-            out = self.forward_orig(
-                x, img_ids, context, txt_ids, attention_mask, timestep, y, guidance,
+            # Call base HunyuanVideo.forward_orig directly to avoid issues if self.forward_orig was left in NAG state
+            out = HunyuanVideo.forward_orig(
+                self, x, img_ids, context, txt_ids, attention_mask, timestep, y, guidance,
                 guiding_frame_index, ref_latent,
                 control=control, transformer_options=transformer_options,
             )
