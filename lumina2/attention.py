@@ -24,7 +24,7 @@ class NAGJointAttention(JointAttention):
         freqs_cis: torch.Tensor,
         transformer_options={},
     ) -> torch.Tensor:
-        
+
         # Standard checks
         if x.shape[0] == 0:
             return self.out(x)
@@ -87,29 +87,32 @@ class NAGJointAttention(JointAttention):
             self.n_local_heads, x_mask_neg, skip_reshape=True, transformer_options=transformer_options
         )
 
-        # --- Apply NAG ONLY to Image Tokens ---
-        
-        # 1. Slice out the image part of the output
-        # sequence structure in NextDiT is typically [Image, Text] or [Text, Image]
-        # In Lumina2/NextDiT, the image is patchified first. 
-        # We assume Image tokens come first (0 to img_len).
-        
+        # Apply NAG ONLY to Image Tokens
         img_pos = out_positive[:, :img_len, :]
         img_neg = out_negative[:, :img_len, :]
-        
+
         # 2. Apply Guidance to Image tokens
         img_guided = nag(img_pos, img_neg, self.nag_scale, self.nag_tau, self.nag_alpha)
-        
+
         # 3. Keep the Positive Text tokens untouched
-        # (We discard the negative text tokens essentially, they served their purpose in Attention)
+        # (We discard the negative text tokens, they served their purpose in Attention)
         txt_pos = out_positive[:, img_len:, :]
-        
+
         # 4. Reconstruct the guided positive sequence
         out_guided_sequence = torch.cat([img_guided, txt_pos], dim=1)
 
-        # 5. Concatenate with full negative batch 
-        # (This is required because the wrapper expects batch size to match input, 
-        # even though we throw away the negative half later in NAGNextDiT)
-        output = torch.cat([out_guided_sequence, out_negative], dim=0)
+        # 5. Apply output projection and concatenate with negative batch
+        # Process separately to be more explicit about memory usage
+        out_guided_projected = self.out(out_guided_sequence)
+        out_negative_projected = self.out(out_negative)
+        
+        # Concatenate the projected outputs
+        output = torch.cat([out_guided_projected, out_negative_projected], dim=0)
+        
+        # Clean up intermediate tensors to free memory faster
+        del img_pos, img_neg, img_guided, txt_pos, out_guided_sequence
+        del out_positive, out_negative
+        del xq_pos, xq_neg, xk_pos, xk_neg, xv_pos, xv_neg
+        del xq, xk, xv
 
-        return self.out(output)
+        return output
