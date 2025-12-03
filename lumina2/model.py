@@ -23,14 +23,13 @@ class NAGNextDiT(NextDiT):
         transformer_options = kwargs.get("transformer_options", {})
         apply_nag = check_nag_activation(transformer_options, nag_sigma_end)
 
-        attention_forwards = list()
+        modules_patched = list()
 
         if apply_nag:
             # 1. Calculate Image Token Count for the Attention layer to use
             _, _, h, w = x.shape
             p = self.patch_size
             img_token_len = (h // p) * (w // p)
-            transformer_options["nag_img_token_len"] = img_token_len
 
             # 2. Prepare Inputs
             context = cat_context(context, nag_negative_context)
@@ -44,10 +43,11 @@ class NAGNextDiT(NextDiT):
             # 3. Patch Modules safely
             for name, module in self.named_modules():
                 # Check for 'qkv' attribute to ensure we only patch actual Attention layers
-                # and strictly exclude the rope_embedder or other false positives.
                 if isinstance(module, JointAttention) and hasattr(module, "qkv"):
-                    attention_forwards.append((module, module.forward))
-                    module.forward = MethodType(NAGJointAttention.forward, module)
+                    # CHANGE: Swizzle the class instead of MethodType binding
+                    modules_patched.append((module, module.__class__))
+                    module.__class__ = NAGJointAttention
+                    module._nag_img_token_len = img_token_len
 
         try:
             # 4. Execute Model
@@ -63,12 +63,13 @@ class NAGNextDiT(NextDiT):
         finally:
             # 5. Restore Original Methods (Always run this, even if crash happens)
             if apply_nag:
-                for mod, forward_fn in attention_forwards:
-                    mod.forward = forward_fn
+                # CHANGE: Restore the original class type
+                for mod, original_class in modules_patched:
+                    mod.__class__ = original_class
 
                 # Cleanup
-                if "nag_img_token_len" in transformer_options:
-                    del transformer_options["nag_img_token_len"]
+                if hasattr(mod, '_nag_img_token_len'):
+                    delattr(mod, '_nag_img_token_len')
 
         # 6. Post-process Output
         if apply_nag and isinstance(output, torch.Tensor):
